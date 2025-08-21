@@ -7,6 +7,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from langgraph_sdk import get_client
 from langgraph_sdk.schema import Thread
+from discord.message import Message
 
 load_dotenv()
 
@@ -21,7 +22,7 @@ ROLES = {
 
 token = os.getenv('DISCORD_TOKEN')
 
-handler = logging.FileHandler(filename='event_server/logs/discord.log', encoding='utf-8', mode='w')
+handler = logging.FileHandler(filename='discord.log', encoding='utf-8', mode='w')
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -30,6 +31,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 new_role = ROLES["TRAINEE"]
 
 _LANGGRAPH_CLIENT = get_client(url=os.environ["ASSISTANT_URL"])
+ASSISTANT_ID = os.environ["ASSISTANT_ID"]
 
 async def missing_role_error(ctx, error):
     """ Handle missing role errors for commands that require specific roles. """
@@ -40,8 +42,10 @@ async def missing_role_error(ctx, error):
 async def on_ready():
     print('bot is ready')
 
-async def _get_shared_thread(ctx) -> discord.Thread:
-    """Finds or creates a shared Discord thread for the entire guild.
+async def _get_shared_thread(message: Message) -> discord.Thread:
+    """In case of wanting to use a discord thread for the guild.
+    
+    Finds or creates a shared Discord thread for the entire guild.
 
     This function iterates through all active threads in the channel and
     returns the one with a predefined name if it exists. If not, it creates a new one.
@@ -52,18 +56,11 @@ async def _get_shared_thread(ctx) -> discord.Thread:
     Returns:
         discord.Thread: The shared thread for the guild.
     """
-    # Check if the command was sent in a server channel
-    if not isinstance(ctx.channel, discord.TextChannel):
-        # If it's a DM or private thread, just use the current channel
-        return ctx.channel
-
-    # Check for an existing shared thread
-    for thread in ctx.channel.threads:
-        if thread.name == SHARED_THREAD_NAME:
-            return thread
-
-    # If no existing thread is found, create a new one
-    return await ctx.channel.create_thread(name=SHARED_THREAD_NAME)
+    channel = message.channel
+    if isinstance(channel, discord.Thread):
+        return channel
+    else:
+        return await channel.create_thread(name="Response", message=message)
     
 async def _create_or_fetch_lg_thread(thread_id: uuid.UUID) -> Thread:
     """Create or fetch a LangGraph thread for the given thread ID.
@@ -112,13 +109,13 @@ async def recipe(ctx, *, question: str = None):
     """
     # Check if a question was provided
     if not question:
-        thread = await _get_shared_thread(ctx)
-        await thread.send("Please provide a question. Usage: `!recipe <your question>`")
+        # thread = await _get_shared_thread(ctx.message)
+        await ctx.send("Please provide a question. Usage: `!recipe <your question>`")
         return
     
     async with ctx.typing():
         guild_id = ctx.guild.id if ctx.guild else None
-        thread = await _get_shared_thread(ctx)
+        # thread = await _get_shared_thread(ctx.message)
         lg_thread = await _create_or_fetch_lg_thread(
             uuid.uuid5(uuid.NAMESPACE_DNS, f"DISCORD_GUILD:{guild_id}")
         )
@@ -126,6 +123,7 @@ async def recipe(ctx, *, question: str = None):
         user_id = ctx.author.id
         run_result = await _LANGGRAPH_CLIENT.runs.wait(
             thread_id,
+            assistant_id=ASSISTANT_ID,
             input={"question": question},
             config={
                 "configurable": {
@@ -133,7 +131,7 @@ async def recipe(ctx, *, question: str = None):
                 }
             },
         )
-        bot_message = run_result["messages"][-1]
+        bot_message = run_result["generation"]
         response = bot_message["content"]
 
         # Check if the response is too long
@@ -152,14 +150,14 @@ async def recipe(ctx, *, question: str = None):
             # Send each chunk as a separate message
             for chunk in chunks:
                 try:
-                    await thread.send(chunk)
+                    await ctx.send(chunk)
                 except discord.errors.HTTPException as e:
                     print(f"An error occurred while sending a chunk: {e}")
                 await asyncio.sleep(1)  # avoid rate limits
         else:
             # If the response is short enough, send it as one message
             try:
-                await thread.send(response)
+                await ctx.send(response)
             except discord.errors.HTTPException as e:
                 print(f"An error occurred while sending the message: {e}")
 
